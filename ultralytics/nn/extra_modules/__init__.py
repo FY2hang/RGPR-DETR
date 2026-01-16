@@ -11,3 +11,7 @@ from .FreqFusion import *
 from .mhafyolo import *
 from .mambaIR import *
 from .DCMPNet import MFM
+from .HSFPN import *
+from .yolov13 import *
+from .UMFormer import *
+from .RepStem import RepStem

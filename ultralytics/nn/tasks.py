@@ -778,7 +778,12 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
                  MANet_Star, C2f_HFERB, C2f_DTAB, C2f_JDPM, C2f_ETB, C2f_FDT, PSConv, C2f_AP, C2f_ELGCA, C2f_ELGCA_CGLU, C2f_Strip, C2f_StripCGLU,
                  C2f_KAT, C2f_Faster_KAN, C2f_DCMB, C2f_DCMB_KAN, C2f_GlobalFilter, C2f_DynamicFilter, RepHMS, C2f_SAVSS, C2f_MambaOut,
                  C2f_EfficientVIM, C2f_EfficientVIM_CGLU, CSP_MSCB_SC, C2f_MambaOut_UniRepLK, C2f_IEL, IELC3, C2f_RCB, C2f_FAT, C2f_LEGM, C2f_MobileMamba,
-                 C2f_LFEM, LoGStem, C2f_SBSM, C2f_LSBlock, C2f_MambaOut_LSConv, C2f_TransMamba, C2f_EVS, C2f_EBlock, C2f_DBlock):
+                 C2f_LFEM, LoGStem, C2f_SBSM, C2f_LSBlock, C2f_MambaOut_LSConv, C2f_TransMamba, C2f_EVS, C2f_EBlock, C2f_DBlock, C2f_FDConv, C2f_MambaOut_FDConv,
+                 C2f_PFDConv, C2f_FasterFDConv, FDConvC3, C2f_DSAN, C2f_DSAN_EDFFN, C2f_MambaOut_DSA, C2f_DSA, C2f_RMB, GSConvE, C2f_SFSConv, C2f_MambaOut_SFSC,
+                 C2f_PSFSConv, C2f_FasterSFSConv, C2f_GroupMamba, C2f_GroupMambaBlock, C2f_MambaVision, C2f_FourierConv, FourierConv, C2f_wConv, wConv2d,
+                 C2f_GLVSS, C2f_ESC, C2f_MBRConv3, C2f_MBRConv5, MBRConv3C3, MBRConv5C3, C2f_VSSD, C2f_TVIM, C2f_CSI, C2f_SHSA_EPGO, C2f_SHSA_EPGO_CGLU, C2f_ConvAttn,
+                 C2f_UniConvBlock, C2f_LGLB, C2f_ConverseB, C2f_Converse2D, Converse2DC3, Converse2D, RepStem, C2f_GCConv, GCConvC3, GCConv, C2f_CFBlock, C2f_FMABlock,
+                 C2f_LWGA, C2f_CSSC, C2f_CNCM, C2f_HFRB, C2f_EVA, C2f_RMBC, C2f_RMBC_LA):
             if args[0] == 'head_channel':
                 args[0] = d[args[0]]
             c1, c2 = ch[f], args[0]
@@ -809,7 +814,12 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
                      MANet_FasterBlock, MANet_FasterCGLU, MANet_Star, C2f_HFERB, C2f_DTAB, C2f_JDPM, C2f_ETB, C2f_FDT, C2f_AP, C2f_ELGCA, C2f_ELGCA_CGLU, 
                      C2f_Strip, C2f_StripCGLU, C2f_KAT, C2f_Faster_KAN, C2f_DCMB, C2f_DCMB_KAN, C2f_GlobalFilter, C2f_DynamicFilter, C2f_SAVSS, C2f_MambaOut,
                      C2f_EfficientVIM, C2f_EfficientVIM_CGLU, CSP_MSCB_SC, C2f_MambaOut_UniRepLK, C2f_IEL, IELC3, C2f_RCB, C2f_FAT, C2f_LEGM, C2f_MobileMamba,
-                     C2f_LFEM, C2f_SBSM, C2f_LSBlock, C2f_MambaOut_LSConv, C2f_TransMamba, C2f_EVS, C2f_EBlock, C2f_DBlock):
+                     C2f_LFEM, C2f_SBSM, C2f_LSBlock, C2f_MambaOut_LSConv, C2f_TransMamba, C2f_EVS, C2f_EBlock, C2f_DBlock, C2f_FDConv, C2f_MambaOut_FDConv,
+                     C2f_PFDConv, C2f_FasterFDConv, FDConvC3, C2f_DSAN, C2f_DSAN_EDFFN, C2f_MambaOut_DSA, C2f_DSA, C2f_RMB, C2f_SFSConv, C2f_MambaOut_SFSC,
+                     C2f_PSFSConv, C2f_FasterSFSConv, C2f_GroupMamba, C2f_GroupMambaBlock, C2f_MambaVision, C2f_FourierConv, C2f_wConv, C2f_GLVSS, C2f_ESC,
+                     C2f_MBRConv3, C2f_MBRConv5, MBRConv3C3, MBRConv5C3, C2f_VSSD, C2f_TVIM, C2f_CSI, C2f_SHSA_EPGO, C2f_SHSA_EPGO_CGLU, C2f_ConvAttn, C2f_UniConvBlock,
+                     C2f_LGLB, C2f_ConverseB, C2f_Converse2D, Converse2DC3, C2f_GCConv, GCConvC3, C2f_CFBlock, C2f_FMABlock, C2f_LWGA, C2f_CSSC, C2f_CNCM, C2f_HFRB, C2f_EVA, 
+                     C2f_RMBC, C2f_RMBC_LA):
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m in (AIFI, AIFI_LPE, TransformerEncoderLayer_LocalWindowAttention, TransformerEncoderLayer_DAttention, TransformerEncoderLayer_HiLo, 
@@ -818,7 +828,9 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
                    TransformerEncoderLayer_Pola, TransformerEncoderLayer_TSSA, TransformerEncoderLayer_ASSA, TransformerEncoderLayer_Pola_CGLU,
                    TransformerEncoderLayer_Pola_FMFFN, AIFI_SEFN, TransformerEncoderLayer_ASSA_SEFN, TransformerEncoderLayer_Pola_SEFN, AIFI_Mona,
                    TransformerEncoderLayer_Pola_SEFN_Mona, TransformerEncoderLayer_ASSA_SEFN_Mona, AIFI_DyT, TransformerEncoderLayer_ASSA_SEFN_Mona_DyT,
-                   TransformerEncoderLayer_Pola_SEFN_Mona_DyT, AIFI_SEFFN, TransformerEncoderLayer_Pola_SEFFN_Mona_DyT, AIFI_EDFFN, TransformerEncoderLayer_Pola_EDFFN_Mona_DyT):
+                   TransformerEncoderLayer_Pola_SEFN_Mona_DyT, AIFI_SEFFN, TransformerEncoderLayer_Pola_SEFFN_Mona_DyT, AIFI_EDFFN, TransformerEncoderLayer_Pola_EDFFN_Mona_DyT,
+                   TransformerEncoderLayer_MSLA, TransformerEncoderLayer_EPGO, TransformerEncoderLayer_SHSA, TransformerEncoderLayer_SHSA_EPGO, AIFI_DML,
+                   TransformerEncoderLayer_LRSA, TransformerEncoderLayer_MALA):
             c2 = ch[f]
             args = [ch[f], *args]
         elif m in (HGStem, HGBlock, Ghost_HGBlock, Rep_HGBlock, HGBlock_Attention):
@@ -839,7 +851,9 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             args[0] = d[args[0]]
             c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
             args = [c1, args[0]]
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        # elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        #     args.insert(1, [ch[x] for x in f])
+        elif m in [RTDETRDecoder ,RTDETR_position_Decoder]: 
             args.insert(1, [ch[x] for x in f])
         elif isinstance(m, str):
             t = m
@@ -889,7 +903,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             c2 = ch[f]
         elif m is ContextGuidedBlock_Down:
             c2 = ch[f] * 2
-            args = [ch[f], c2, *args]
+            args = [ch[f], *args]
         # elif m is BiFusion:
         #     c1 = [ch[x] for x in f]
         #     c2 = make_divisible(min(args[0], max_channels) * width, 8)
@@ -1023,10 +1037,42 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             c1 = [ch[x] for x in f]
             c2 = sum(c1)
             args = [*c1, *args]
+        elif m is SNI:
+            c2, up_f = ch[f], args[0]
+            args = [up_f]
         elif m is Blocks:
             block_type = globals()[args[1]]
             c1, c2 = ch[f], args[0] * block_type.expansion
             args = [c1, args[0], block_type, *args[2:]]
+        elif m in {Pzconv, FCM, FCM_1, FCM_2, FCM_3}:
+            c2 = ch[f]
+            args = [c2]
+        elif m is PST:
+            c1, c_up, c2 = ch[f[0]], ch[f[1]], args[0]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [c1, c_up, c2, *args[1:]]
+            args.insert(3, n)  # number of repeats
+            n = 1
+        elif m is HFP:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m is SDP:
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2, *args[1:]]
+        elif m is HyperACE:
+            c1 = ch[f[1]]
+            c2 = args[0]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            he = args[1] 
+            args = [c1, c2, n, he, *args[2:]]
+            n = 1
+        elif m is FullPAD_Tunnel:
+            c2 = ch[f[0]]
+        elif m is DPCF:
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2]
         else:
             c2 = ch[f]
 

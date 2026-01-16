@@ -198,7 +198,7 @@ class DilatedReparamBlock(nn.Module):
             out = out + bn(conv(x))
         return out
 
-    def switch_to_deploy(self):
+    def merge_dilated_branches(self):
         if hasattr(self, 'origin_bn'):
             origin_k, origin_b = fuse_bn(self.lk_origin, self.origin_bn)
             for k, r in zip(self.kernel_sizes, self.dilates):
@@ -220,6 +220,7 @@ class DilatedReparamBlock(nn.Module):
 
 
 class UniRepLKNetBlock(nn.Module):
+
     def __init__(self,
                  dim,
                  kernel_size,
@@ -329,6 +330,8 @@ class UniRepLKNetBlock(nn.Module):
             linear_bias += grn_bias_projected_bias
             new_linear.bias.data = (bn.bias + (linear_bias - bn.running_mean) * bn.weight / std) * final_scale
             self.pwconv2 = nn.Sequential(new_linear, self.pwconv2[1])
+
+
 
 default_UniRepLKNet_A_F_P_kernel_sizes = ((3, 3),
                                       (13, 13),

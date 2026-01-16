@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
 from einops import rearrange
+import numpy as np
+from typing import Tuple
 
 from ..modules.conv import Conv, autopad
 from ..modules.transformer import TransformerEncoderLayer
@@ -15,6 +17,7 @@ from .semnet import SEFN
 from .mona import Mona
 from .transMamba import SpectralEnhancedFFN
 from .EVSSM import EDFFN
+from .srconvnet import MixFFN
 
 ln = nn.LayerNorm
 linearnorm = partial(LinearNorm, norm1=ln, norm2=RepBN, step=60000)
@@ -25,7 +28,9 @@ __all__ = ['TransformerEncoderLayer_LocalWindowAttention', 'AIFI_LPE', 'Transfor
            'TransformerEncoderLayer_TSSA', 'TransformerEncoderLayer_ASSA', 'TransformerEncoderLayer_Pola_CGLU', 'TransformerEncoderLayer_Pola_FMFFN',
            'AIFI_SEFN', 'TransformerEncoderLayer_Pola_SEFN', 'TransformerEncoderLayer_ASSA_SEFN', 'AIFI_Mona', 'TransformerEncoderLayer_ASSA_SEFN_Mona',
            'TransformerEncoderLayer_Pola_SEFN_Mona', 'AIFI_DyT', 'TransformerEncoderLayer_ASSA_SEFN_Mona_DyT', 'TransformerEncoderLayer_Pola_SEFN_Mona_DyT',
-           'AIFI_SEFFN', 'TransformerEncoderLayer_Pola_SEFFN_Mona_DyT', 'AIFI_EDFFN', 'TransformerEncoderLayer_Pola_EDFFN_Mona_DyT']
+           'AIFI_SEFFN', 'TransformerEncoderLayer_Pola_SEFFN_Mona_DyT', 'AIFI_EDFFN', 'TransformerEncoderLayer_Pola_EDFFN_Mona_DyT', 'TransformerEncoderLayer_MSLA',
+           'TransformerEncoderLayer_EPGO', 'TransformerEncoderLayer_SHSA', 'TransformerEncoderLayer_SHSA_EPGO', 'AIFI_DML', 'TransformerEncoderLayer_LRSA', 
+           'TransformerEncoderLayer_MALA']
 
 ######################################## TransformerEncoderLayer_LocalWindowAttention start ########################################
 
@@ -1958,3 +1963,768 @@ class TransformerEncoderLayer_Pola_EDFFN_Mona_DyT(nn.Module):
         return self.forward_post(src, src_mask, src_key_padding_mask, pos)
 
 ######################################## CVPR2025 EVSSM end ########################################
+
+######################################## MSLA start ########################################
+
+class LinearAttention(nn.Module):
+    def __init__(self, dim, num_heads):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+
+        self.qkv = nn.Linear(dim, 3 * dim, bias=False)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.view(b, c, h * w).permute(0, 2, 1)  # (b, h*w, c)
+
+        qkv = self.qkv(x).reshape(b, h * w, 3, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        key = F.softmax(k, dim=-1)
+        query = F.softmax(q, dim=-2)
+        context = key.transpose(-2, -1) @ v
+        x = (query @ context).reshape(b, h * w, c)
+
+        x = self.proj(x)
+
+        x = x.permute(0, 2, 1).view(b, c, h, w)
+
+        return x
+
+class DepthwiseConv(nn.Module):
+    def __init__(self, in_channels, kernel_size):
+        super(DepthwiseConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, groups=in_channels, padding=kernel_size // 2)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        residual = x
+        x = self.depthwise(x)
+        x = x + residual
+        x = self.relu(x)
+        return x
+
+class MSLA(nn.Module):
+    def __init__(self, dim, num_heads):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+
+        self.dw_conv_3x3 = DepthwiseConv(dim // 4, kernel_size=3)
+        self.dw_conv_5x5 = DepthwiseConv(dim // 4, kernel_size=5)
+        self.dw_conv_7x7 = DepthwiseConv(dim // 4, kernel_size=7)
+        self.dw_conv_9x9 = DepthwiseConv(dim // 4, kernel_size=9)
+
+        self.linear_attention = LinearAttention(dim = dim // 4, num_heads = num_heads)
+
+        self.final_conv = nn.Conv2d(dim, dim, 1)
+
+        self.scale_weights = nn.Parameter(torch.ones(4), requires_grad=True)
+
+    def forward(self, input_):
+        b, n, c = input_.shape
+        h = int(n ** 0.5)
+        w = int(n ** 0.5)
+
+        input_reshaped = input_.reshape([b, c, h, w])
+
+        split_size = c // 4
+        x_3x3 = input_reshaped[:, :split_size, :, :]
+        x_5x5 = input_reshaped[:, split_size:2 * split_size, :, :]
+        x_7x7 = input_reshaped[:, 2 * split_size:3 * split_size:, :, :]
+        x_9x9 = input_reshaped[:, 3 * split_size:, :, :]
+
+        x_3x3 = self.dw_conv_3x3(x_3x3)
+        x_5x5 = self.dw_conv_5x5(x_5x5)
+        x_7x7 = self.dw_conv_7x7(x_7x7)
+        x_9x9 = self.dw_conv_9x9(x_9x9)
+
+        att_3x3 = self.linear_attention(x_3x3)
+        att_5x5 = self.linear_attention(x_5x5)
+        att_7x7 = self.linear_attention(x_7x7)
+        att_9x9 = self.linear_attention(x_9x9)
+
+        processed_input = torch.cat([
+            att_3x3 * self.scale_weights[0],
+            att_5x5 * self.scale_weights[1],
+            att_7x7 * self.scale_weights[2],
+            att_9x9 * self.scale_weights[3]
+        ], dim=1)
+
+        final_output = self.final_conv(processed_input)
+
+        output_reshaped = final_output.reshape(b, n, self.dim)
+
+
+        return output_reshaped
+
+class TransformerEncoderLayer_MSLA(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.assa = MSLA(c1, num_heads=num_heads)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.assa(src.flatten(2).permute(0, 2, 1)).permute(0, 2, 1).view([-1, C, H, W]).contiguous()
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+######################################## MSLA end ########################################
+    
+######################################## ACM MM 2025 start ########################################
+
+class Attention_EPGO(nn.Module):
+    """
+    Attention module that performs self-attention on the input tensor.
+
+    Args:
+        dim (int): The input tensor dimension.
+        num_heads (int): The number of attention heads.
+        attn_ratio (float): The ratio of the attention key dimension to the head dimension.
+
+    Attributes:
+        num_heads (int): The number of attention heads.
+        head_dim (int): The dimension of each attention head.
+        key_dim (int): The dimension of the attention key.
+        scale (float): The scaling factor for the attention scores.
+        qkv (Conv): Convolutional layer for computing the query, key, and value.
+        proj (Conv): Convolutional layer for projecting the attended values.
+        pe (Conv): Convolutional layer for positional encoding.
+    """
+
+    def __init__(self, dim, num_heads=8, attn_ratio=0.5):
+        """Initializes multi-head attention module with query, key, and value convolutions and positional encoding."""
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads # 512 // 8 = 64
+        self.key_dim = int(self.head_dim * attn_ratio) # 64 * 0.5 = 32
+        self.scale = self.key_dim**-0.5
+        nh_kd = self.key_dim * num_heads # 32 * 8 = 256
+        h = dim + nh_kd * 2 # 512 + 256 * 2 = 1024
+        self.qkv = Conv(dim, h, 1, act=False)
+        self.proj = Conv(dim, dim, 1, act=False)
+        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
+
+        self.gate = nn.Sequential(
+            nn.Conv2d(dim, dim // 2, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(dim // 2, 1, kernel_size=1),  # 输出动态 K
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        """
+        Forward pass of the Attention module.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            (torch.Tensor): The output tensor after self-attention.
+        """
+        B, C, H, W = x.shape
+        N = H * W
+        qkv = self.qkv(x) # B, dim + nh_kd * 2, H, W
+        q, k, v = qkv.view(B, self.num_heads, self.key_dim * 2 + self.head_dim, N).split( # 1024 / 8 = 128
+            [self.key_dim, self.key_dim, self.head_dim], dim=2
+        )
+        # q: B, 8, 32, HW
+        # k: B, 8, 32, HW
+        # v: B, 8, 64, HW
+
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+
+        dynamic_k = int(N * self.gate(x).view(B, -1).mean())
+        mask = torch.zeros(B, self.num_heads, N, N, device=x.device, requires_grad=False)
+        index = torch.topk(attn, k=dynamic_k, dim=-1, largest=True)[1]
+        mask.scatter_(-1, index, 1.)
+        attn = torch.where(mask > 0, attn, torch.full_like(attn, float('-inf')))
+
+        attn = attn.softmax(dim=-1)
+        x = (v @ attn.transpose(-2, -1)).view(B, C, H, W) + self.pe(v.reshape(B, C, H, W))
+        x = self.proj(x)
+        return x
+
+class TransformerEncoderLayer_EPGO(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.attn = Attention_EPGO(c1, num_heads=num_heads)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.attn(src)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+######################################## ACM MM 2025 end ########################################
+    
+######################################## SHViT CVPR2024 start ########################################
+    
+class SHSA_GroupNorm(torch.nn.GroupNorm):
+    """
+    Group Normalization with 1 group.
+    Input: tensor in shape [B, C, H, W]
+    """
+    def __init__(self, num_channels, **kwargs):
+        super().__init__(1, num_channels, **kwargs)
+
+class SHSA(torch.nn.Module):
+    """Single-Head Self-Attention"""
+    def __init__(self, dim):
+        super().__init__()
+        qk_dim = int(dim * 0.5)
+        self.scale = qk_dim ** -0.5
+        self.qk_dim = qk_dim
+        self.dim = dim
+        self.pdim = int(dim * 0.25)
+
+        self.pre_norm = SHSA_GroupNorm(self.pdim)
+
+        self.qkv = Conv2d_BN(self.pdim, qk_dim * 2 + self.pdim)
+        self.proj = torch.nn.Sequential(torch.nn.SiLU(), Conv2d_BN(
+            dim, dim, bn_weight_init = 0))
+        
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x1, x2 = torch.split(x, [self.pdim, self.dim - self.pdim], dim = 1)
+        x1 = self.pre_norm(x1)
+        qkv = self.qkv(x1)
+        q, k, v = qkv.split([self.qk_dim, self.qk_dim, self.pdim], dim = 1)
+        q, k, v = q.flatten(2), k.flatten(2), v.flatten(2)
+        
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+        attn = attn.softmax(dim = -1)
+        x1 = (v @ attn.transpose(-2, -1)).reshape(B, self.pdim, H, W)
+        x = self.proj(torch.cat([x1, x2], dim = 1))
+
+        return x
+
+class SHSA_EPGO(torch.nn.Module):
+    """Single-Head Self-Attention"""
+    def __init__(self, dim):
+        super().__init__()
+        qk_dim = int(dim * 0.5)
+        self.scale = qk_dim ** -0.5
+        self.qk_dim = qk_dim
+        self.dim = dim
+        self.pdim = int(dim * 0.25)
+
+        self.pre_norm = SHSA_GroupNorm(self.pdim)
+
+        self.qkv = Conv2d_BN(self.pdim, qk_dim * 2 + self.pdim)
+        self.proj = torch.nn.Sequential(torch.nn.SiLU(), Conv2d_BN(
+            dim, dim, bn_weight_init = 0))
+        
+        self.gate = nn.Sequential(
+            nn.Conv2d(dim, dim // 2, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(dim // 2, 1, kernel_size=1),  # 输出动态 K
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        N = H * W
+        x1, x2 = torch.split(x, [self.pdim, self.dim - self.pdim], dim = 1)
+        x1 = self.pre_norm(x1)
+        qkv = self.qkv(x1)
+        q, k, v = qkv.split([self.qk_dim, self.qk_dim, self.pdim], dim = 1)
+        q, k, v = q.flatten(2), k.flatten(2), v.flatten(2)
+        
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+
+        dynamic_k = int(N * self.gate(x).view(B, -1).mean())
+        mask = torch.zeros(B, N, N, device=x.device, requires_grad=False)
+        index = torch.topk(attn, k=dynamic_k, dim=-1, largest=True)[1]
+        mask.scatter_(-1, index, 1.)
+        attn = torch.where(mask > 0, attn, torch.full_like(attn, float('-inf')))
+
+        attn = attn.softmax(dim = -1)
+        x1 = (v @ attn.transpose(-2, -1)).reshape(B, self.pdim, H, W)
+        x = self.proj(torch.cat([x1, x2], dim = 1))
+
+        return x
+
+class TransformerEncoderLayer_SHSA(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.attn = SHSA(c1)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.attn(src)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+class TransformerEncoderLayer_SHSA_EPGO(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.attn = SHSA_EPGO(c1)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.attn(src)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+######################################## SHViT CVPR2024 end ########################################
+    
+######################################## IJCV2024 SRConvNet start ########################################
+    
+class TransformerEncoderLayer_DML(nn.Module):
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+
+        from ...utils.torch_utils import TORCH_1_9
+        if not TORCH_1_9:
+            raise ModuleNotFoundError(
+                'TransformerEncoderLayer() requires torch>=1.9 to use nn.MultiheadAttention(batch_first=True).')
+        self.ma = nn.MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
+        # Implementation of Feedforward model
+        self.ffn = MixFFN(c1, 16)
+
+        self.norm1 = nn.LayerNorm(c1)
+        self.norm2 = nn.LayerNorm(c1)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    @staticmethod
+    def with_pos_embed(tensor, pos=None):
+        """Add position embeddings to the tensor if provided."""
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        B, C, H, W = src.size()
+        x_spatial = src
+        src = src.flatten(2).permute(0, 2, 1)
+        q = k = self.with_pos_embed(src, pos)
+        src2 = self.ma(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.ffn(src2.permute(0, 2, 1).view([B, C, H, W]).contiguous()).flatten(2).permute(0, 2, 1)
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward_pre(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with pre-normalization."""
+        B, C, H, W = src.size()
+        x_spatial = src
+        src2 = self.norm1(src.flatten(2).permute(0, 2, 1))
+        q = k = self.with_pos_embed(src2, pos)
+        src2 = self.ma(q, k, value=src2, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src2 = self.norm2(src)
+        src2 = self.ffn(src2.permute(0, 2, 1).view([B, C, H, W]).contiguous(), x_spatial).flatten(2).permute(0, 2, 1)
+        return src + self.dropout2(src2)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        if self.normalize_before:
+            return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+class AIFI_DML(TransformerEncoderLayer_DML):
+    """Defines the AIFI transformer layer."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0, act=nn.GELU(), normalize_before=False):
+        """Initialize the AIFI instance with specified parameters."""
+        super().__init__(c1, cm, num_heads, dropout, act, normalize_before)
+
+    def forward(self, x):
+        """Forward pass for the AIFI transformer layer."""
+        c, h, w = x.shape[1:]
+        pos_embed = self.build_2d_sincos_position_embedding(w, h, c)
+        # Flatten [B, C, H, W] to [B, HxW, C]
+        x = super().forward(x, pos=pos_embed.to(device=x.device, dtype=x.dtype))
+        return x.permute(0, 2, 1).view([-1, c, h, w]).contiguous()
+
+    @staticmethod
+    def build_2d_sincos_position_embedding(w, h, embed_dim=256, temperature=10000.0):
+        """Builds 2D sine-cosine position embedding."""
+        assert embed_dim % 4 == 0, "Embed dimension must be divisible by 4 for 2D sin-cos position embedding"
+        grid_w = torch.arange(w, dtype=torch.float32)
+        grid_h = torch.arange(h, dtype=torch.float32)
+        grid_w, grid_h = torch.meshgrid(grid_w, grid_h, indexing="ij")
+        pos_dim = embed_dim // 4
+        omega = torch.arange(pos_dim, dtype=torch.float32) / pos_dim
+        omega = 1.0 / (temperature**omega)
+
+        out_w = grid_w.flatten()[..., None] @ omega[None]
+        out_h = grid_h.flatten()[..., None] @ omega[None]
+
+        return torch.cat([torch.sin(out_w), torch.cos(out_w), torch.sin(out_h), torch.cos(out_h)], 1)[None]
+
+######################################## IJCV2024 SRConvNet end ########################################
+    
+######################################## TPAMI2025 LRFormer start ########################################
+
+class LRSA(nn.Module):
+    def __init__(self, dim, num_heads=4, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., 
+        pooled_sizes=[11,8,6,4], q_pooled_size=16, q_conv=False):
+
+        super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} should be divided by num_heads {num_heads}."
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_elements = np.array([t*t for t in pooled_sizes]).sum()
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.q = nn.Sequential(nn.Linear(dim, dim, bias=qkv_bias))
+        self.kv = nn.Sequential(nn.Linear(dim, dim * 2, bias=qkv_bias))
+        
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.pooled_sizes = pooled_sizes
+        self.pools = nn.ModuleList()
+        self.eps = 0.001
+        
+        self.norm = nn.LayerNorm(dim)
+        
+        self.q_pooled_size = q_pooled_size
+        
+        # Useless code
+        if q_conv and self.q_pooled_size > 1:
+            self.q_conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, stride=1, groups=dim)
+            self.q_norm = nn.LayerNorm(dim)
+        else:
+            self.q_conv = None
+            self.q_norm = None
+        
+        self.d_convs = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim) for temp in pooled_sizes])
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+        N = H * W
+        x = x.flatten(2).permute(0, 2, 1) # B C H W -> B N C
+        
+        if self.q_pooled_size > 1:
+            # Too keep the W/H ratio of the features
+            q_pooled_size = (self.q_pooled_size, round(W*float(self.q_pooled_size)/H + self.eps)) \
+                if W >= H else (round(H*float(self.q_pooled_size)/W + self.eps), self.q_pooled_size)
+            
+            # Conduct fixed pooled size pooling on q
+            q = F.adaptive_avg_pool2d(x.transpose(1, 2).reshape(B, C, H, W), q_pooled_size)
+            _, _, H1, W1 = q.shape
+            if self.q_conv is not None:
+                q = q + self.q_conv(q)
+                q = self.q_norm(q.view(B, C, -1).transpose(1, 2))
+            else:
+                q = q.view(B, C, -1).transpose(1, 2)
+            q = self.q(q).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3).contiguous()
+        else:
+            H1, W1 = H, W
+            if self.q_conv is not None:
+                x1 = x.view(B, -1, C).transpose(1, 2).reshape(B, C, H1, W1)
+                q = x1 + self.q_conv(x1)
+                q = self.q_norm(q.view(B, C, -1).transpose(1, 2))
+                q = self.q(q).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3).contiguous()
+            else:
+                q = self.q(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3).contiguous()
+        
+        # Conduct Pyramid Pooling on K, V
+        pools = []
+        x_ = x.permute(0, 2, 1).reshape(B, C, H, W)
+        for (pooled_size, l) in zip(self.pooled_sizes, self.d_convs):
+            pooled_size = (pooled_size, round(W*pooled_size/H + self.eps)) if W >= H else (round(H*pooled_size/W + self.eps), pooled_size)
+            pool = F.adaptive_avg_pool2d(x_, pooled_size)
+            pool = pool + l(pool)
+            pools.append(pool.view(B, C, -1))
+        
+        pools = torch.cat(pools, dim=2)
+        pools = self.norm(pools.permute(0,2,1))
+        
+        kv = self.kv(pools).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+
+        # self-attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v)   # B N C
+        x = x.transpose(1,2).reshape(B, -1, C)
+        
+        x = self.proj(x)
+        
+        # Bilinear upsampling for residual connection
+        x = x.transpose(1, 2).reshape(B, C, H1, W1)
+        if self.q_pooled_size > 1: 
+            x = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)
+
+        return x
+
+class TransformerEncoderLayer_LRSA(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.attn = LRSA(c1, num_heads=num_heads)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.attn(src)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+######################################## TPAMI2025 LRFormer end ########################################
+    
+######################################## ICCV2025 Rectifying Magnitude Neglect in Linear Attention start ########################################
+
+def rotate_every_two(x):
+    x1 = x[:, :, :, ::2]
+    x2 = x[:, :, :, 1::2]
+    x = torch.stack([-x2, x1], dim=-1)
+    return x.flatten(-2)
+
+def theta_shift(x, sin, cos):
+    return (x * cos) + (rotate_every_two(x) * sin)
+
+class RoPE(nn.Module):
+
+    def __init__(self, embed_dim, num_heads):
+        '''
+        recurrent_chunk_size: (clh clw)
+        num_chunks: (nch ncw)
+        clh * clw == cl
+        nch * ncw == nc
+
+        default: clh==clw, clh != clw is not implemented
+        '''
+        super().__init__()
+        angle = 1.0 / (10000 ** torch.linspace(0, 1, embed_dim // num_heads // 4))
+        angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
+        self.register_buffer('angle', angle)
+    
+    def forward(self, slen: Tuple[int]):
+        '''
+        slen: (h, w)
+        h * w == l
+        recurrent is not implemented
+        '''
+        # index = torch.arange(slen[0]*slen[1]).to(self.angle)
+        index_h = torch.arange(slen[0]).to(self.angle)
+        index_w = torch.arange(slen[1]).to(self.angle)
+        # sin = torch.sin(index[:, None] * self.angle[None, :]) #(l d1)
+        # sin = sin.reshape(slen[0], slen[1], -1).transpose(0, 1) #(w h d1)
+        sin_h = torch.sin(index_h[:, None] * self.angle[None, :]) #(h d1//2)
+        sin_w = torch.sin(index_w[:, None] * self.angle[None, :]) #(w d1//2)
+        sin_h = sin_h.unsqueeze(1).repeat(1, slen[1], 1) #(h w d1//2)
+        sin_w = sin_w.unsqueeze(0).repeat(slen[0], 1, 1) #(h w d1//2)
+        sin = torch.cat([sin_h, sin_w], -1) #(h w d1)
+        # cos = torch.cos(index[:, None] * self.angle[None, :]) #(l d1)
+        # cos = cos.reshape(slen[0], slen[1], -1).transpose(0, 1) #(w h d1)
+        cos_h = torch.cos(index_h[:, None] * self.angle[None, :]) #(h d1//2)
+        cos_w = torch.cos(index_w[:, None] * self.angle[None, :]) #(w d1//2)
+        cos_h = cos_h.unsqueeze(1).repeat(1, slen[1], 1) #(h w d1//2)
+        cos_w = cos_w.unsqueeze(0).repeat(slen[0], 1, 1) #(h w d1//2)
+        cos = torch.cat([cos_h, cos_w], -1) #(h w d1)
+
+        retention_rel_pos = (sin.flatten(0, 1), cos.flatten(0, 1))
+
+        return retention_rel_pos
+
+class MALA(nn.Module):
+
+    def __init__(self, dim, num_heads=8):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.qkvo = nn.Conv2d(dim, dim * 4, 1)
+        self.lepe = nn.Conv2d(dim, dim, 5, 1, 2, groups=dim)
+        self.proj = nn.Conv2d(dim, dim, 1)
+        self.scale = self.head_dim ** -0.5
+        self.elu = nn.ELU()
+
+        self.repo = RoPE(dim, num_heads)
+
+    def forward(self, x: torch.Tensor):
+        '''
+        x: (b c h w)
+        sin: ((h w) d1)
+        cos: ((h w) d1)
+        '''
+        B, C, H, W = x.shape
+        sin, cos = self.repo((H, W))
+        qkvo = self.qkvo(x) #(b 3*c h w)
+        qkv = qkvo[:, :3*self.dim, :, :]
+        o = qkvo[:, 3*self.dim:, :, :]
+        lepe = self.lepe(qkv[:, 2*self.dim:, :, :]) # (b c h w)
+
+        q, k, v = rearrange(qkv, 'b (m n d) h w -> m b n (h w) d', m=3, n=self.num_heads) # (b n (h w) d)
+
+        q = self.elu(q) + 1
+        k = self.elu(k) + 1
+
+        z = q @ k.mean(dim=-2, keepdim=True).transpose(-2, -1) * self.scale
+
+        q = theta_shift(q, sin, cos)
+        k = theta_shift(k, sin, cos)
+
+        kv = (k.transpose(-2, -1) * (self.scale / (H*W)) ** 0.5) @ (v * (self.scale / (H*W)) ** 0.5)
+
+        res = q @ kv * (1 + 1/(z + 1e-6)) - z * v.mean(dim=2, keepdim=True)
+
+        res = rearrange(res, 'b n (h w) d -> b (n d) h w', h=H, w=W)
+        res = res + lepe
+        return self.proj(res * o)
+
+class TransformerEncoderLayer_MALA(nn.Module):
+    """Defines a single layer of the transformer encoder."""
+
+    def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
+        """Initialize the TransformerEncoderLayer with specified parameters."""
+        super().__init__()
+        self.attn = MALA(c1, num_heads=num_heads)
+        # Implementation of Feedforward model
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.act = act
+        self.normalize_before = normalize_before
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Performs forward pass with post-normalization."""
+        BS, C, H, W = src.size()
+        src2 = self.attn(src)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        """Forward propagates the input through the encoder module."""
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+######################################## ICCV2025 Rectifying Magnitude Neglect in Linear Attention end ########################################
